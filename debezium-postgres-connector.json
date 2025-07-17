@@ -1,0 +1,21 @@
+{
+    "name": "inventory-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+        "database.hostname": "postgres",
+        "database.port": "5432",
+        "database.user": "postgres",
+        "database.password": "postgres",
+        "database.dbname": "testdb",
+        "database.server.name": "dbserver1",
+        "table.include.list": "inventory.customers,inventory.products,inventory.orders",
+        "plugin.name": "pgoutput",
+        "publication.autocreate.mode": "filtered",
+        "slot.name": "debezium_slot",
+        "topic.prefix": "dbserver1",
+        "transforms": "route",
+        "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+        "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
+        "transforms.route.replacement": "$3"
+    }
+}
