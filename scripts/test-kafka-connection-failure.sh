@@ -3,214 +3,25 @@
 # Test Script: Kafka Connection Failure
 # This script tests how Debezium handles Kafka connection failures and restarts
 
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/test-utils.sh"
+
 echo "============================================"
 echo "    KAFKA CONNECTION FAILURE TEST"
 echo "============================================"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;94m'
-NC='\033[0m' # No Color
 
-log() {
-    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')] $1${NC}"
-}
 
-error() {
-    echo -e "${RED}[ERROR] $1${NC}"
-}
 
-success() {
-    echo -e "${GREEN}[SUCCESS] $1${NC}"
-}
 
-warning() {
-    echo -e "${YELLOW}[WARNING] $1${NC}"
-}
 
-# Function to wait for user input
-wait_for_user() {
-    read -p "Press Enter to continue..."
-}
 
-# Function to check if Kafka container is running
-check_kafka_running() {
-    log "Checking if Kafka container is running..."
-    if docker ps --format "table {{.Names}}" | grep -q "^kafka$"; then
-        success "Kafka container is running"
-        return 0
-    else
-        error "Kafka container is not running"
-        return 1
-    fi
-}
 
-# Function to check if Kafka container is running
-setup_kafka_connect() {
-    if [ -f "./scripts/setup-connector.sh" ]; then
-        bash ./scripts/setup-connector.sh >/dev/null 2>&1 || {
-            error "Kafka Connect setup failed"
-            return 1
-        }
-        success "Kafka Connect setup completed"
-    else
-        warning "setup-connector.sh not found, skipping Kafka Connect setup"
-    fi
-}
 
-# Function to show current database state
-show_database_state() {
-    local step_name="$1"
-    log "=== DATABASE STATE: $step_name ==="
 
-    log "Current customers table:"
-    docker exec postgres psql -U postgres -d testdb -c "
-        SELECT id, first_name, last_name, email, created_at
-        FROM inventory.customers
-        ORDER BY id;
-    " -t
 
-    log "Current products table:"
-    docker exec postgres psql -U postgres -d testdb -c "
-        SELECT id, name, description, price, quantity, created_at
-        FROM inventory.products
-        ORDER BY id;
-    " -t
 
-        log "Current orders table:"
-    docker exec postgres psql -U postgres -d testdb -c "
-        SELECT id, customer_id, product_id, quantity, total_amount, status, created_at
-        FROM inventory.orders
-        ORDER BY id;
-    " -t
-    echo ""
-}
-
-# Function to capture replication slot information
-capture_replication_slot_info() {
-    local step_name="$1"
-    log "=== REPLICATION SLOT INFO: $step_name ==="
-
-    docker exec postgres psql -U postgres -d testdb -c "
-        SELECT
-            slot_name,
-            plugin,
-            slot_type,
-            active,
-            restart_lsn,
-            confirmed_flush_lsn,
-            pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS lag_size,
-            pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS flush_lag_size
-        FROM pg_replication_slots
-        WHERE slot_name LIKE '%debezium%' OR slot_name LIKE '%inventory%';
-    "
-
-    log "Current WAL LSN position:"
-    docker exec postgres psql -U postgres -d testdb -c "
-        SELECT pg_current_wal_lsn() AS current_wal_lsn;
-    "
-    echo ""
-}
-
-# Function to capture Kafka consumer group offsets
-capture_kafka_offsets() {
-    local step_name="$1"
-    log "=== KAFKA CONSUMER OFFSETS: $step_name ==="
-
-    # Check if Kafka is available
-    if ! docker exec kafka kafka-topics --bootstrap-server localhost:29092 --list > /dev/null 2>&1; then
-        warning "Kafka not available - cannot check consumer offsets"
-        return
-    fi
-
-    # List consumer groups
-    log "Checking for consumer groups..."
-    consumer_groups=$(docker exec kafka kafka-consumer-groups --bootstrap-server localhost:29092 --list 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$consumer_groups" ] && [ "$consumer_groups" != "" ]; then
-        log "Available consumer groups:"
-        echo "$consumer_groups"
-
-        # Try to find Debezium-related consumer groups
-        log "Debezium Connect worker offsets:"
-        found_group=false
-
-        # Try different possible consumer group names
-        for group_name in "connect-inventory-connector" "inventory-connector" "connect-cluster" "dbserver1"; do
-            if echo "$consumer_groups" | grep -q "$group_name"; then
-                log "Found consumer group: $group_name"
-                docker exec kafka kafka-consumer-groups --bootstrap-server localhost:29092 --group "$group_name" --describe 2>/dev/null
-                found_group=true
-                break
-            fi
-        done
-
-        if [ "$found_group" = false ]; then
-            log "No Debezium-related consumer groups found yet. Available groups:"
-            echo "$consumer_groups"
-            log "(This is normal if Kafka Connect hasn't started consuming yet)"
-        fi
-    else
-        log "No consumer groups exist yet"
-        log "(This is normal during initial setup or when Kafka Connect hasn't started consuming)"
-    fi
-
-    # Show topic high watermarks
-    log "Topic high watermarks (latest offsets):"
-    for topic in customers products orders; do
-        if docker exec kafka kafka-topics --bootstrap-server localhost:29092 --list 2>/dev/null | grep -q "^$topic$"; then
-            hwm=$(docker exec kafka kafka-run-class kafka.tools.GetOffsetShell \
-                --broker-list localhost:29092 \
-                --topic $topic \
-                --time -1 2>/dev/null | awk -F: '{sum += $3} END {print sum}')
-            echo "  $topic: $hwm"
-        else
-            echo "  $topic: topic not created yet"
-        fi
-    done
-    echo ""
-}
-
-# Function to show detailed message correlation
-show_message_correlation() {
-    local step_name="$1"
-    log "=== MESSAGE CORRELATION: $step_name ==="
-
-    # Show recent messages with more detail
-    for topic in customers products orders; do
-        if docker exec kafka kafka-topics --bootstrap-server localhost:29092 --list 2>/dev/null | grep -q "^$topic$"; then
-            log "Recent $topic messages (with payload details):"
-            docker exec kafka kafka-console-consumer \
-                --bootstrap-server localhost:29092 \
-                --topic $topic \
-                --from-beginning \
-                --timeout-ms 5000 \
-                --property print.key=true \
-                --property key.separator=" | " \
-                --property print.timestamp=true 2>/dev/null | tail -10 || true
-            echo ""
-        fi
-    done
-}
-
-# Function to check Kafka Connect status
-check_connect_status() {
-    log "Checking Kafka Connect status..."
-    # Check connector status
-    local attempts=0
-    while [ $attempts -lt 12 ]; do
-        connector_state=$(curl -s http://localhost:8083/connectors/inventory-connector/status 2>/dev/null | jq -r '.connector.state' 2>/dev/null)
-        if [ "$connector_state" = "RUNNING" ]; then
-            success "Connector is RUNNING again!"
-            break
-        else
-            log "Connector state: $connector_state (attempt $((attempts+1))/12)"
-            sleep 10
-            ((attempts++))
-        fi
-    done
-}
 
 # Function to generate test data
 generate_test_data() {
@@ -228,17 +39,7 @@ generate_test_data() {
     success "✅ Baseline data inserted: 2 customers, 2 products"
 }
 
-# Function to check message counts in Kafka topics
-check_message_counts() {
-    log "Checking message counts in Kafka topics..."
-    for topic in customers products orders; do
-        count=$(docker exec kafka kafka-run-class kafka.tools.GetOffsetShell \
-            --broker-list localhost:29092 \
-            --topic $topic \
-            --time -1 2>/dev/null | awk -F: '{sum += $3} END {print sum}')
-        echo "  $topic: $count messages"
-    done
-}
+
 
 # Function to consume recent messages
 consume_recent_messages() {
@@ -267,7 +68,7 @@ main() {
     # Verify Kafka is running before starting the test
     check_kafka_running
     setup_kafka_connect
-    check_connect_status
+    check_connect_status_basic
 
     # Show initial state before any changes
     show_database_state "Initial Setup"
@@ -288,11 +89,6 @@ main() {
 
     # Step 3: Stop Kafka (simulate connection failure)
     warning "Step 3: Simulating Kafka connection failure..."
-
-    # Capture state before stopping Kafka
-    log "Capturing state before Kafka outage..."
-    capture_replication_slot_info "Before Kafka Outage"
-    capture_kafka_offsets "Before Kafka Outage"
 
     log "Stopping Kafka container..."
     docker stop kafka
@@ -329,31 +125,27 @@ main() {
     show_database_state "After Outage Data Generation"
     capture_replication_slot_info "During Kafka Outage"
 
-    # Step 5: Verify Kafka is stopped and check Kafka Connect response
-    log "Step 5: Verifying Kafka is stopped and checking Kafka Connect response..."
-    sleep 10
+    # Step 5: Verify Kafka is stopped and wait for Kafka Connect to detect the failure
+    log "Step 5: Verifying Kafka is stopped and waiting for Kafka Connect to detect the failure..."
 
     # Verify Kafka container is actually stopped
     if check_kafka_running; then
         error "Kafka container is still running! Connection failure simulation failed."
         warning "The test may not be working as expected."
+        return 1
     else
         success "✅ Kafka container is stopped as expected - connection failure simulated successfully."
     fi
 
     # Verify Kafka Connect is still running (it should be trying to connect and failing)
-    log "Verifying Kafka Connect is still running..."
+    log "Verifying Kafka Connect container is still running..."
     if docker ps --format "table {{.Names}}" | grep -q "^kafka-connect$"; then
-        success "✅ Kafka Connect container is still running (will show connection errors)"
+        success "✅ Kafka Connect container is still running (will attempt to connect to Kafka and fail)"
     else
         error "❌ Kafka Connect container is not running - this is unexpected!"
+        return 1
     fi
 
-    # Now check how Kafka Connect responds to the Kafka outage
-    log "Checking how Kafka Connect responds to Kafka being down..."
-    check_connect_status
-
-    warning "Kafka Connect should show connection errors and be in a failed state. This is expected."
     wait_for_user
 
     # Step 6: Restart Kafka
@@ -379,7 +171,7 @@ main() {
     sleep 20
 
     # Check connector status with retry logic
-    check_connect_status
+    check_connect_status_basic
 
     # Capture state immediately after reconnection
     log "Capturing state after Kafka reconnection..."
