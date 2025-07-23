@@ -80,12 +80,7 @@ Open http://localhost:8080 in your browser to view:
 - Connector status
 - Consumer groups
 
-#### Option 2: Using the Console Consumer Script
-```bash
-./scripts/consume-events.sh
-```
-
-#### Option 3: Manual Console Consumer
+#### Option 2: Manual Console Consumer
 ```bash
 # Consume customers events
 docker exec -it kafka kafka-console-consumer \
@@ -108,21 +103,20 @@ docker exec -it kafka kafka-console-consumer \
 
 ### Generate Test Events
 
-#### Option 1: Using the Test SQL Script
-Connect to PostgreSQL and run the test operations:
+You can generate CDC events by performing database operations directly:
 
+#### Manual Operations
+
+Connect to PostgreSQL:
 ```bash
-# Connect to PostgreSQL
+# Connect to PostgreSQL via Docker
 docker exec -it postgres psql -U postgres -d testdb
 
 # Or if you have psql installed locally
 psql -h localhost -U postgres -d testdb
-
-# Run the test script
-\i scripts/test-cdc.sql
 ```
 
-#### Option 2: Manual Operations
+Then execute SQL operations to generate CDC events:
 ```sql
 -- Insert new customer
 INSERT INTO inventory.customers (first_name, last_name, email) VALUES
@@ -138,6 +132,29 @@ DELETE FROM inventory.orders WHERE id = 1;
 ```
 
 Each of these operations will generate corresponding CDC events in Kafka.
+
+#### Testing Different Scenarios
+
+The repository includes several test scripts for different failure and resilience scenarios:
+
+```bash
+# Test transaction rollback handling
+./scripts/test-transaction-rollback.sh
+
+# Test database connection failure
+./scripts/test-db-connection-failure.sh
+
+# Test Kafka connection failure
+./scripts/test-kafka-connection-failure.sh
+
+# Test Kafka Connect crash scenarios
+./scripts/test-kafka-connect-crash.sh
+
+# Test WAL retention failure
+./scripts/test-wal-retention-failure.sh
+```
+
+These scripts test how Debezium handles various failure conditions and help validate the resilience of your CDC setup.
 
 ## Service Endpoints
 
