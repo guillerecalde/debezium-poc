@@ -231,37 +231,6 @@ capture_kafka_offsets() {
         return
     fi
 
-    # List consumer groups
-    log "Checking for consumer groups..."
-    consumer_groups=$(docker exec kafka kafka-consumer-groups --bootstrap-server localhost:29092 --list 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$consumer_groups" ] && [ "$consumer_groups" != "" ]; then
-        log "Available consumer groups:"
-        echo "$consumer_groups"
-
-        # Try to find Debezium-related consumer groups
-        log "Debezium Connect worker offsets:"
-        found_group=false
-
-        # Try different possible consumer group names
-        for group_name in "connect-inventory-connector" "inventory-connector" "connect-cluster" "dbserver1"; do
-            if echo "$consumer_groups" | grep -q "$group_name"; then
-                log "Found consumer group: $group_name"
-                docker exec kafka kafka-consumer-groups --bootstrap-server localhost:29092 --group "$group_name" --describe 2>/dev/null
-                found_group=true
-                break
-            fi
-        done
-
-        if [ "$found_group" = false ]; then
-            log "No Debezium-related consumer groups found yet. Available groups:"
-            echo "$consumer_groups"
-            log "(This is normal if Kafka Connect hasn't started consuming yet)"
-        fi
-    else
-        log "No consumer groups exist yet"
-        log "(This is normal during initial setup or when Kafka Connect hasn't started consuming)"
-    fi
-
     # Show topic high watermarks
     log "Topic high watermarks (latest offsets):"
     for topic in customers products orders; do
