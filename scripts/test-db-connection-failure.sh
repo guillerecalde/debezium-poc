@@ -57,7 +57,7 @@ check_connect_status() {
     local attempts=0
     local restart_attempted=false
 
-    while [ $attempts -lt 20 ]; do
+    while [ $attempts -lt 5 ]; do
         connector_state=$(curl -s http://localhost:8083/connectors/inventory-connector/status 2>/dev/null | jq -r '.connector.state' 2>/dev/null)
         task_state=$(curl -s http://localhost:8083/connectors/inventory-connector/status 2>/dev/null | jq -r '.tasks[0].state' 2>/dev/null)
 
@@ -70,8 +70,8 @@ check_connect_status() {
             restart_attempted=true
             sleep 15  # Give more time after restart
         else
-            log "Connector state: $connector_state, Task state: $task_state (attempt $((attempts+1))/20)"
-            if [ $attempts -lt 19 ]; then
+            log "Connector state: $connector_state, Task state: $task_state (attempt $((attempts+1))/5)"
+            if [ $attempts -lt 4 ]; then
                 sleep 10
             fi
         fi
@@ -140,15 +140,45 @@ force_connector_restart() {
 reconnect_with_original_password() {
     log "Reconnecting Debezium with original password..."
 
-    # Step 1: Change database password back to original
+        # Step 1: Change database password back to original
     change_database_password "postgres"
 
-    # Step 2: Delete the existing connector to ensure clean state
+    # Step 2: Force WAL activity to trigger reconnection attempt
+    log "Forcing WAL activity to trigger connector reconnection attempt with restored password..."
+    sleep 2  # Brief pause after password change
+    force_wal_activity "Password-Restored"
+
+    # Step 3: First test if existing connector can automatically reconnect
+    log "Testing if existing connector can automatically reconnect after WAL activity trigger..."
+    sleep 5  # Give time for connector to process the WAL activity and attempt reconnection
+
+    if check_connect_status_no_restart 20; then
+        success "✅ Connector automatically reconnected after password restore and WAL activity trigger!"
+        success "✅ No connector restart or reconfiguration was needed!"
+        log "This demonstrates Debezium's automatic recovery from authentication failures when triggered by WAL activity"
+        return 0
+    fi
+
+        # Step 4: If automatic reconnection failed, try manual restart without deleting connector
+    warning "Automatic reconnection failed. Attempting manual connector restart..."
+    log "Testing if manual restart is sufficient (without deleting/recreating connector)..."
+    restart_connector
+    sleep 10
+
+    if check_connect_status_no_restart 15; then
+        success "✅ Connector recovered after manual restart!"
+        success "✅ No connector deletion/recreation was needed!"
+        log "This shows manual restart can recover from authentication failures"
+        return 0
+    fi
+
+    # Step 5: If restart failed, delete and recreate connector as last resort
+    warning "Manual restart failed. Proceeding with connector deletion and recreation..."
     log "Deleting existing connector to ensure clean reconfiguration..."
     curl -X DELETE http://localhost:8083/connectors/inventory-connector 2>/dev/null
     sleep 3
 
-    # Step 3: Use the setup script to recreate the connector
+    # Step 6: Use the setup script to recreate the connector
     if [ -f "./scripts/setup-connector.sh" ]; then
         log "Running setup-connector.sh to recreate connector with original password..."
         bash ./scripts/setup-connector.sh >/dev/null 2>&1 || {
@@ -161,14 +191,15 @@ reconnect_with_original_password() {
         return 1
     fi
 
-        # Step 4: First test if connector can recover automatically
+    # Step 7: Final verification after recreation
     sleep 5
-    log "Testing automatic recovery capabilities..."
+    log "Testing recovery after connector recreation..."
     if check_connect_status_no_restart 15; then
-        success "Connector recovered automatically after password reset!"
+        success "✅ Connector recovered after recreation!"
+        log "This shows complete connector recreation resolves authentication failures"
     else
-        warning "Connector did not recover automatically, will need manual restart"
-        log "Attempting manual restart..."
+        warning "Connector did not recover automatically after recreation, will need manual restart"
+        log "Attempting final manual restart..."
         restart_connector
     fi
 }

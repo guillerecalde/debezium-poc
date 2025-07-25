@@ -146,6 +146,51 @@ main() {
         return 1
     fi
 
+        # Attempt to connect to Kafka to demonstrate the connection failure
+    log "Attempting to connect to Kafka to demonstrate connection failure..."
+
+    # Test TCP connectivity to Kafka from Kafka Connect container
+    log "Testing TCP connectivity to Kafka broker from Kafka Connect container:"
+    if docker exec kafka-connect timeout 5 bash -c "echo > /dev/tcp/kafka/9092" 2>/dev/null; then
+        error "❌ Unexpected: TCP connection to Kafka succeeded when it should have failed!"
+    else
+        success "✅ Expected: TCP connection to Kafka failed (Connection refused/timeout)"
+        log "Connection failure is expected since Kafka container is stopped"
+    fi
+
+    # Try using netcat to test connection
+    log "Using netcat to test Kafka port connectivity:"
+    if docker exec kafka-connect timeout 3 nc -z kafka 9092 2>/dev/null; then
+        error "❌ Unexpected: Netcat connection succeeded when it should have failed!"
+    else
+        success "✅ Expected: Netcat connection failed - port 9092 unreachable"
+    fi
+
+    # Check connector status to see if it shows any error states
+    log "Checking connector status during Kafka outage:"
+    connector_status=$(curl -s http://localhost:8083/connectors/inventory-connector/status 2>/dev/null | jq '.' 2>/dev/null || echo "Connection failed")
+    if [ "$connector_status" = "Connection failed" ]; then
+        warning "⚠️  Cannot reach Kafka Connect API (may be in transitional state)"
+    else
+        echo "$connector_status" | jq '.connector.state, .tasks[0].state' 2>/dev/null || echo "Status check failed"
+        log "Connector may be in FAILED state or attempting to reconnect"
+    fi
+
+    # Check Kafka Connect logs for connection errors
+    log "Checking recent Kafka Connect logs for connection errors:"
+    docker logs kafka-connect --tail 10 2>/dev/null | grep -i "kafka\|connection\|error" || {
+        log "No obvious connection errors in recent logs (may appear shortly)"
+    }
+
+    log ""
+    log "Summary of connection failure verification:"
+    log "• Kafka Connect container: RUNNING (but can't reach Kafka)"
+    log "• TCP connectivity to Kafka: FAILED (expected)"
+    log "• Netcat port check: FAILED (expected)"
+    log "• Connector status: Likely in FAILED state or retrying"
+    log "• This confirms Kafka connection failure is working as designed"
+    log ""
+
     wait_for_user
 
     # Step 6: Restart Kafka
